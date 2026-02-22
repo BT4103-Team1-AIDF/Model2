@@ -18,12 +18,11 @@ Implemented model set:
 - `random_forest` (multiclass RF)
 - `xgboost` (multiclass XGB)
 - `lightgbm` (multiclass LGBM)
-- `rnn` (TensorFlow SimpleRNN baseline; optional)
 
 ## Folder Structure
 
 ```text
-model_repo/
+models/
   README.md
   requirements.txt
   run_benchmarks.py
