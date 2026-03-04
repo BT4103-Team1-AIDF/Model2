@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import argparse
 
-from src.benchmark import run_benchmarks
+from benchmark import run_benchmarks
 
 
 def parse_args():
@@ -18,8 +18,8 @@ def parse_args():
     p.add_argument(
         "--models",
         nargs="+",
-        default=["logistic", "random_forest", "xgboost", "lightgbm", "rnn"],
-        help="Model list: logistic random_forest xgboost lightgbm rnn",
+        default=["logistic", "random_forest", "xgboost", "lightgbm", "lstm"],
+        help="Model list: logistic random_forest xgboost lightgbm lstm",
     )
     p.add_argument("--time-col", default="yyyy", help="Time column used for rolling window splits")
     p.add_argument(
