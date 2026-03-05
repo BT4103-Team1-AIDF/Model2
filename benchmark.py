@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
 import json
+import os
 import random
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -117,8 +120,17 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_feature_columns(df: pd.DataFrame, label_col: str, drop_cols: Sequence[str]) -> List[str]:
+    def _looks_like_label(col: str) -> bool:
+        if col == "y":
+            return True
+        if re.match(r"^y_?\d+m$", col):
+            return True
+        if re.match(r"^(label|target)_\d+m$", col):
+            return True
+        return False
+
     drops = set(drop_cols) | {label_col}
-    return [c for c in df.columns if c not in drops]
+    return [c for c in df.columns if c not in drops and not _looks_like_label(c)]
 
 
 def _make_multiclass_sample_weight(y: np.ndarray) -> np.ndarray:
@@ -202,17 +214,20 @@ def build_model(name: str, random_state: int = 42, params: Optional[Dict] = None
         lgb_defaults = dict(
             objective="multiclass",
             num_class=3,
-            n_estimators=500,
-            learning_rate=0.03,
+            n_estimators=240,
+            learning_rate=0.05,
             num_leaves=31,
-            max_depth=-1,
+            max_depth=8,
             subsample=0.9,
             colsample_bytree=0.9,
+            max_bin=127,
+            min_child_samples=40,
             reg_alpha=0.1,
             reg_lambda=2.0,
             class_weight="balanced",
             random_state=random_state,
             n_jobs=4,
+            verbosity=-1,
         )
         lgb_defaults.update(params)
         return Pipeline(steps=[("imputer", SimpleImputer(strategy="median")), ("clf", LGBMClassifier(**lgb_defaults))])
@@ -385,9 +400,8 @@ def _tune_time_series_params(
 
     if model_name == "lightgbm":
         candidates = [
-            {"num_leaves": 31, "learning_rate": 0.03, "n_estimators": 400},
-            {"num_leaves": 63, "learning_rate": 0.02, "n_estimators": 600},
-            {"num_leaves": 31, "learning_rate": 0.05, "n_estimators": 300},
+            {"num_leaves": 31, "learning_rate": 0.06, "n_estimators": 180, "max_bin": 127, "max_depth": 8},
+            {"num_leaves": 47, "learning_rate": 0.05, "n_estimators": 240, "max_bin": 127, "max_depth": 8},
         ]
     elif model_name == "lstm":
         candidates = [
@@ -562,6 +576,241 @@ def rolling_window_eval(
         ),
         yearly_df,
     )
+
+
+def _ordered_proba_n3(model_name: str, model, proba: np.ndarray) -> np.ndarray:
+    if model_name == "lstm":
+        out = np.asarray(proba, dtype=float)
+        if out.ndim == 2 and out.shape[1] == 3:
+            return out
+        return np.full((len(out), 3), 1.0 / 3.0, dtype=float)
+
+    out = np.zeros((proba.shape[0], 3), dtype=float)
+    classes = np.asarray(model.named_steps["clf"].classes_)
+    for i, cls in enumerate(classes):
+        idx = int(cls)
+        if 0 <= idx <= 2:
+            out[:, idx] = proba[:, i]
+    row_sum = np.sum(out, axis=1, keepdims=True)
+    return out / np.maximum(row_sum, 1e-12)
+
+
+def _write_submission_artifacts(
+    output_dir: Path,
+    yearly_df: pd.DataFrame,
+    auc_all: float,
+    auc_roll_mean: float,
+    valid_years: int,
+) -> None:
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    os.makedirs("/tmp/matplotlib", exist_ok=True)
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    yearly_path = output_dir / "yearly_metrics.csv"
+    yearly_df.to_csv(yearly_path, index=False)
+
+    plot_df = yearly_df.dropna(subset=["auc_default"])
+    png_path = output_dir / "yearly_auc.png"
+    plt.figure(figsize=(8, 4))
+    if len(plot_df) > 0:
+        plt.plot(plot_df["year"], plot_df["auc_default"], marker="o")
+    plt.xlabel("Year")
+    plt.ylabel("AUC (Default vs Rest)")
+    plt.title("Yearly Default AUC")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(png_path, dpi=150)
+    plt.close()
+
+    with open(output_dir / "scores.txt", "w") as f:
+        f.write(f"AUC_ALL: {auc_all}\n")
+        f.write(f"AUC_ROLL_MEAN: {auc_roll_mean}\n")
+        f.write(f"VALID_YEARS: {valid_years}\n")
+
+    table_html = yearly_df.to_html(
+        index=False,
+        float_format=lambda x: "" if (isinstance(x, float) and np.isnan(x)) else f"{x:.6f}"
+        if isinstance(x, (float, np.floating))
+        else str(x),
+    )
+    with open(png_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("ascii")
+
+    def _fmt(v):
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return "n/a"
+        return f"{float(v):.6f}"
+
+    html = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Detailed Results</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 16px; }}
+    h2 {{ margin-top: 0; }}
+    .kpi {{ display:flex; gap:16px; flex-wrap:wrap; margin: 8px 0 16px 0; }}
+    .card {{ border:1px solid #e5e5e5; padding:10px 12px; border-radius:8px; }}
+    .card b {{ display:block; margin-bottom:4px; }}
+    table {{ border-collapse: collapse; width: 100%; }}
+    th, td {{ border: 1px solid #ddd; padding: 6px 8px; font-size: 13px; }}
+    th {{ background: #f6f6f6; }}
+  </style>
+</head>
+<body>
+  <h2>Yearly AUC (Default vs. Rest)</h2>
+  <div class="kpi">
+    <div class="card"><b>AUC_ALL</b>{_fmt(auc_all)}</div>
+    <div class="card"><b>AUC_ROLL_MEAN</b>{_fmt(auc_roll_mean)}</div>
+    <div class="card"><b>VALID_YEARS</b>{valid_years}</div>
+  </div>
+  <h3>Plot</h3>
+  <img src="data:image/png;base64,{b64}" style="max-width:100%; height:auto; border:1px solid #ddd; padding:6px; border-radius:6px;" />
+  <h3>Table</h3>
+  {table_html}
+  <p>Files generated by scoring: <code>yearly_metrics.csv</code>, <code>yearly_auc.png</code>, and this <code>detailed_results.html</code>.</p>
+</body>
+</html>
+"""
+    with open(output_dir / "detailed_results.html", "w", encoding="utf-8") as f:
+        f.write(html)
+
+
+def run_submission_evaluation(
+    data_path: str,
+    output_dir: str,
+    model_name: str = "lightgbm",
+    horizon: int = 12,
+    time_col: str = "yyyy",
+    train_end_year: int = 2014,
+    test_data_path: Optional[str] = None,
+    drop_cols: Sequence[str] = ("CompNo", "yyyy", "mm"),
+    random_state: int = 42,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    _set_global_seed(random_state)
+
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+
+    if test_data_path is not None:
+        train_raw = pd.read_csv(data_path).copy()
+        test_raw = pd.read_csv(test_data_path).copy()
+        train_raw["__split"] = "train"
+        test_raw["__split"] = "test"
+        df = engineer_features(pd.concat([train_raw, test_raw], ignore_index=True))
+        train_df = df[df["__split"] == "train"].drop(columns=["__split"]).copy()
+        test_df = df[df["__split"] == "test"].drop(columns=["__split"]).copy()
+    else:
+        raw_df = pd.read_csv(data_path)
+        df = engineer_features(raw_df)
+        train_df = df[df[time_col] <= train_end_year].copy()
+        test_df = df[df[time_col] > train_end_year].copy()
+        if len(train_df) == 0 or len(test_df) == 0:
+            raise ValueError("Train/test split is empty. Check time column and train_end_year.")
+
+    label_col = resolve_label_col(train_df, horizon)
+    if label_col not in test_df.columns:
+        raise ValueError(f"Test data must contain '{label_col}' for local evaluation and plotting.")
+    feature_cols = build_feature_columns(train_df, label_col=label_col, drop_cols=drop_cols)
+
+    tuned_params, tuned_val_auc = _tune_time_series_params(
+        train_df,
+        label_col=label_col,
+        feature_cols=feature_cols,
+        model_name=model_name,
+        year_col=time_col,
+        random_state=random_state,
+    )
+
+    X_tr = train_df[feature_cols].values
+    y_tr = train_df[label_col].astype(int).values
+    X_te = test_df[feature_cols].values
+    y_te_default = (test_df[label_col].astype(int).values == 1).astype(int)
+
+    if model_name == "lstm":
+        split = _split_train_val_by_year(train_df, time_col)
+        X_val = None
+        y_val = None
+        if split is not None:
+            tr_inner, val_inner = split
+            X_tr = tr_inner[feature_cols].values
+            y_tr = tr_inner[label_col].astype(int).values
+            X_val = val_inner[feature_cols].values
+            y_val = val_inner[label_col].astype(int).values
+        proba = _fit_predict_lstm(
+            X_train=X_tr,
+            y_train=y_tr,
+            X_test=X_te,
+            random_state=random_state,
+            params=tuned_params,
+            X_val=X_val,
+            y_val=y_val,
+        )
+        p_default = proba[:, 1]
+        proba_n3 = _ordered_proba_n3(model_name, None, proba)
+    else:
+        proba, model = _fit_predict_once(
+            model_name=model_name,
+            X_train=X_tr,
+            y_train=y_tr,
+            X_test=X_te,
+            random_state=random_state,
+            params=tuned_params,
+        )
+        p_default = _extract_default_proba(model_name, model, proba)
+        proba_n3 = _ordered_proba_n3(model_name, model, proba)
+
+    rows = []
+    for year in sorted(pd.unique(test_df[time_col])):
+        sub = test_df[test_df[time_col] == year]
+        idx = sub.index.to_numpy()
+        mask = test_df.index.isin(idx)
+        y_year = (sub[label_col].astype(int).values == 1).astype(int)
+        p_year = p_default[mask]
+        rows.append(
+            {
+                "year": int(year),
+                "auc_default": _safe_auc(y_year, p_year),
+                "n_default": int(np.sum(y_year)),
+                "n_total": int(len(y_year)),
+            }
+        )
+
+    yearly_df = pd.DataFrame(rows)
+    auc_all = _safe_auc(y_te_default, p_default)
+    auc_roll_mean = float(np.nanmean(yearly_df["auc_default"].values)) if len(yearly_df) > 0 else np.nan
+    valid_years = int(np.sum(~np.isnan(yearly_df["auc_default"].values))) if len(yearly_df) > 0 else 0
+
+    pred_keys = [c for c in ["CompNo", "yyyy", "mm"] if c in test_df.columns]
+    pred_df = test_df[pred_keys].copy()
+    pred_df["p0"] = proba_n3[:, 0]
+    pred_df["p1"] = proba_n3[:, 1]
+    pred_df["p2"] = proba_n3[:, 2]
+    pred_df.to_csv(output / "predictions.csv", index=False)
+
+    _write_submission_artifacts(output, yearly_df, auc_all, auc_roll_mean, valid_years)
+
+    summary_df = pd.DataFrame(
+        [
+            {
+                "model": model_name,
+                "horizon_months": int(horizon),
+                "train_end_year": int(train_end_year),
+                "overall_auc": auc_all,
+                "mean_yearly_auc": auc_roll_mean,
+                "valid_years": valid_years,
+                "n_test": int(len(y_te_default)),
+                "n_default_test": int(np.sum(y_te_default)),
+                "tuned_val_auc": tuned_val_auc,
+                "status": "ok",
+            }
+        ]
+    )
+    summary_df.to_csv(output / "submission_summary.csv", index=False)
+    return summary_df, yearly_df
 
 
 def run_benchmarks(

@@ -81,6 +81,22 @@ python run_benchmarks.py \
   --models logistic random_forest xgboost lightgbm lstm
 ```
 
+### Run submission-style evaluation (train<=2014, test>=2015)
+
+This mode produces CodaBench-like artifacts:
+`predictions.csv`, `yearly_metrics.csv`, `yearly_auc.png`, `scores.txt`, `detailed_results.html`.
+
+```bash
+python run_benchmarks.py \
+  --mode submission \
+  --data-path /path/to/train_labeled_upto2014.csv \
+  --test-data-path /path/to/test_labeled_from2015.csv \
+  --output-dir outputs/submission_h12_lightgbm \
+  --horizons 12 \
+  --models lightgbm \
+  --train-end-year 2014
+```
+
 ## Rolling Evaluation Logic
 
 For each horizon and each model:
@@ -116,6 +132,15 @@ Saved to `--output-dir`:
 
 - If `xgboost` or `lightgbm` are not installed, those rows will be marked failed.
 - If `tensorflow` is not installed, `lstm` will fail; other models still run.
+
+### XGBoost environment fix
+
+If benchmark output shows `Model 'xgboost' is unavailable in this environment.`, install it in the same Python interpreter:
+
+```bash
+python3 -m pip install --user xgboost
+python3 -c "import xgboost; print(xgboost.__version__)"
+```
 
 ## Suggested Next Modelling Steps
 

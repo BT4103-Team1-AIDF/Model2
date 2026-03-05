@@ -203,14 +203,18 @@ class Model:
                 self.lgb_model = LGBMClassifier(
                     objective="multiclass",
                     num_class=3,
-                    n_estimators=350,
-                    learning_rate=0.04,
+                    n_estimators=220,
+                    learning_rate=0.05,
                     num_leaves=31,
+                    max_depth=8,
+                    max_bin=127,
+                    min_child_samples=40,
                     subsample=0.9,
                     colsample_bytree=0.9,
                     class_weight="balanced",
                     random_state=42,
                     n_jobs=2,
+                    verbosity=-1,
                 )
                 self.lgb_model.fit(X_scaled, y, sample_weight=self._make_multiclass_sample_weight(y))
                 self.use_lgb = True
