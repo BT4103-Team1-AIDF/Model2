@@ -53,10 +53,24 @@ For example, horizon 12 uses `y_12m` if present.
 ## Setup
 
 ```bash
-cd /Users/yewj/School/BT4103/Corporate\ Default\ Practice/model_repo
-python -m venv .venv
+# from repo root (example: /Users/gary/Desktop/project-code/models)
+cd /path/to/models
+python3 -m venv .venv
 source .venv/bin/activate
+python3 -m pip install --upgrade pip
 pip install -r requirements.txt
+```
+
+Optional (macOS, needed by many `lightgbm` / `xgboost` installs):
+
+```bash
+brew install libomp
+```
+
+Quick check:
+
+```bash
+python run_benchmarks.py --help
 ```
 
 ## Run Benchmarks
