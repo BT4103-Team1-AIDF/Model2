@@ -68,7 +68,8 @@ python run_benchmarks.py \
   --data-path ../../Data/train_labeled_upto2014.csv \
   --output-dir outputs/h12 \
   --horizons 12 \
-  --models logistic random_forest xgboost lightgbm
+  --models logistic random_forest xgboost lightgbm \
+  --max-tuning-trials 12
 ```
 
 ### Run full target horizons (requires corresponding label columns)
@@ -78,7 +79,8 @@ python run_benchmarks.py \
   --data-path /path/to/train_with_all_horizon_labels.csv \
   --output-dir outputs/full_horizon \
   --horizons 1 3 6 12 24 36 48 60 \
-  --models logistic random_forest xgboost lightgbm lstm
+  --models logistic random_forest xgboost lightgbm lstm \
+  --max-tuning-trials 12
 ```
 
 ### Run submission-style evaluation (train<=2014, test>=2015)
@@ -94,7 +96,8 @@ python run_benchmarks.py \
   --output-dir outputs/submission_h12_lightgbm \
   --horizons 12 \
   --models lightgbm \
-  --train-end-year 2014
+  --train-end-year 2014 \
+  --max-tuning-trials 12
 ```
 
 ## Rolling Evaluation Logic
@@ -112,7 +115,13 @@ For each horizon and each model:
    - `mean_yearly_auc` across valid yearly AUCs
 
 `min_train_years` is configurable (default `8`).
-For `lightgbm` and `lstm`, a small time-series-only tuning step is run using the last year in the training period as validation.
+For every model (`logistic`, `random_forest`, `xgboost`, `lightgbm`, `lstm`), tuning is done with a time-series validation split using only the training period (last train year as validation).
+
+You can control tuning runtime with:
+
+```bash
+--max-tuning-trials 12
+```
 
 ## Output Artifacts
 
@@ -145,6 +154,6 @@ python3 -c "import xgboost; print(xgboost.__version__)"
 ## Suggested Next Modelling Steps
 
 1. Add/verify horizon label generation (`y_1m` ... `y_60m`).
-2. Hyperparameter tuning per horizon for XGBoost/LightGBM.
+2. Expand tuning grids and trial budget per horizon as needed.
 3. Add confidence intervals via repeated time splits.
 4. Freeze best model configs for submission package.

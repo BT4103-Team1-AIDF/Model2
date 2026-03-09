@@ -37,6 +37,7 @@ def parse_args():
     )
     p.add_argument("--min-train-years", type=int, default=8, help="Minimum initial train years for rolling evaluation")
     p.add_argument("--train-end-year", type=int, default=2014, help="Train/test split year used in submission mode")
+    p.add_argument("--max-tuning-trials", type=int, default=12, help="Maximum hyperparameter tuning trials per model")
     p.add_argument("--random-state", type=int, default=42)
     return p.parse_args()
 
@@ -54,6 +55,7 @@ def main():
             test_data_path=args.test_data_path,
             drop_cols=args.drop_cols,
             random_state=args.random_state,
+            max_tuning_trials=args.max_tuning_trials,
         )
     else:
         summary_df, yearly_df = run_benchmarks(
@@ -65,6 +67,7 @@ def main():
             drop_cols=args.drop_cols,
             min_train_years=args.min_train_years,
             random_state=args.random_state,
+            max_tuning_trials=args.max_tuning_trials,
         )
     print("Saved benchmark outputs")
     print("Summary rows:", len(summary_df))

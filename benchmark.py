@@ -5,6 +5,7 @@ import json
 import os
 import random
 import re
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -16,6 +17,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import ParameterGrid
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -35,6 +37,12 @@ try:
 except Exception:
     tf = None
     layers = None
+
+
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names, but LGBMClassifier was fitted with feature names",
+)
 
 
 DEFAULT_HORIZONS = [1, 3, 6, 12, 24, 36, 48, 60]
@@ -282,12 +290,12 @@ def _fit_predict_lstm(
     if X_val is not None:
         X_val = X_val[..., np.newaxis]
 
-    units = int(params.get("units", 24))
-    dense_units = int(params.get("dense_units", 24))
+    units = int(params.get("units", 16))
+    dense_units = int(params.get("dense_units", 16))
     dropout = float(params.get("dropout", 0.2))
     lr = float(params.get("learning_rate", 1e-3))
-    epochs = int(params.get("epochs", 8))
-    batch_size = int(params.get("batch_size", 512))
+    epochs = int(params.get("epochs", 4))
+    batch_size = int(params.get("batch_size", 1024))
 
     classes = np.array([0, 1, 2], dtype=int)
     counts = np.array([max(int(np.sum(y_train == c)), 1) for c in classes], dtype=float)
@@ -386,6 +394,65 @@ def _split_train_val_by_year(df: pd.DataFrame, year_col: str) -> Optional[Tuple[
     return tr, val
 
 
+def _tuning_param_grid(model_name: str) -> Dict[str, List]:
+    if model_name == "logistic":
+        return {
+            "C": [0.1, 0.3, 1.0, 3.0, 10.0],
+            "solver": ["lbfgs", "liblinear"],
+        }
+    if model_name == "random_forest":
+        return {
+            "n_estimators": [300, 500],
+            "max_depth": [8, 12, None],
+            "min_samples_leaf": [5, 20],
+            "max_features": ["sqrt", 0.8],
+        }
+    if model_name == "xgboost":
+        return {
+            "n_estimators": [300, 500],
+            "learning_rate": [0.03, 0.05],
+            "max_depth": [4, 6],
+            "min_child_weight": [3, 5],
+            "subsample": [0.85, 1.0],
+            "colsample_bytree": [0.85, 1.0],
+        }
+    if model_name == "lightgbm":
+        return {
+            "n_estimators": [180, 240, 320],
+            "learning_rate": [0.03, 0.05],
+            "num_leaves": [31, 47],
+            "max_depth": [8, -1],
+            "max_bin": [127],
+            "min_child_samples": [20, 40],
+        }
+    if model_name == "lstm":
+        return {
+            "units": [16, 24],
+            "dense_units": [16, 24],
+            "dropout": [0.2],
+            "learning_rate": [8e-4, 1e-3],
+            "epochs": [3, 5],
+            "batch_size": [512, 1024],
+        }
+    return {}
+
+
+def _build_tuning_candidates(model_name: str, random_state: int, max_tuning_trials: int) -> List[Dict]:
+    grid = _tuning_param_grid(model_name)
+    if not grid:
+        return [{}]
+
+    all_candidates = [dict(row) for row in ParameterGrid(grid)]
+    if len(all_candidates) == 0:
+        return [{}]
+
+    model_seed_offset = sum(ord(ch) for ch in model_name) % 10000
+    rng = np.random.default_rng(int(random_state) + model_seed_offset)
+    order = rng.permutation(len(all_candidates))
+    n_keep = min(len(all_candidates), max(1, int(max_tuning_trials)))
+    return [all_candidates[int(i)] for i in order[:n_keep]]
+
+
 def _tune_time_series_params(
     df: pd.DataFrame,
     label_col: str,
@@ -393,23 +460,17 @@ def _tune_time_series_params(
     model_name: str,
     year_col: str,
     random_state: int,
-) -> Tuple[Dict, float]:
+    max_tuning_trials: int = 12,
+) -> Tuple[Dict, float, int]:
     split = _split_train_val_by_year(df, year_col)
     if split is None:
-        return {}, np.nan
+        return {}, np.nan, 0
 
-    if model_name == "lightgbm":
-        candidates = [
-            {"num_leaves": 31, "learning_rate": 0.06, "n_estimators": 180, "max_bin": 127, "max_depth": 8},
-            {"num_leaves": 47, "learning_rate": 0.05, "n_estimators": 240, "max_bin": 127, "max_depth": 8},
-        ]
-    elif model_name == "lstm":
-        candidates = [
-            {"units": 24, "dense_units": 24, "dropout": 0.2, "learning_rate": 1e-3, "epochs": 6, "batch_size": 512},
-            {"units": 32, "dense_units": 32, "dropout": 0.25, "learning_rate": 8e-4, "epochs": 8, "batch_size": 512},
-        ]
-    else:
-        return {}, np.nan
+    candidates = _build_tuning_candidates(
+        model_name=model_name,
+        random_state=random_state,
+        max_tuning_trials=max_tuning_trials,
+    )
 
     tr, val = split
     X_tr = tr[feature_cols].values
@@ -453,8 +514,8 @@ def _tune_time_series_params(
             continue
 
     if best_auc == -np.inf:
-        return {}, np.nan
-    return best_params, float(best_auc)
+        return {}, np.nan, len(candidates)
+    return best_params, float(best_auc), len(candidates)
 
 
 def rolling_window_eval(
@@ -689,8 +750,13 @@ def run_submission_evaluation(
     test_data_path: Optional[str] = None,
     drop_cols: Sequence[str] = ("CompNo", "yyyy", "mm"),
     random_state: int = 42,
+    max_tuning_trials: int = 12,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     _set_global_seed(random_state)
+    print(
+        f"[submission] model={model_name} horizon={horizon} train_end_year={train_end_year} tuning_trials={max_tuning_trials}",
+        flush=True,
+    )
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -716,13 +782,14 @@ def run_submission_evaluation(
         raise ValueError(f"Test data must contain '{label_col}' for local evaluation and plotting.")
     feature_cols = build_feature_columns(train_df, label_col=label_col, drop_cols=drop_cols)
 
-    tuned_params, tuned_val_auc = _tune_time_series_params(
+    tuned_params, tuned_val_auc, tuning_trials = _tune_time_series_params(
         train_df,
         label_col=label_col,
         feature_cols=feature_cols,
         model_name=model_name,
         year_col=time_col,
         random_state=random_state,
+        max_tuning_trials=max_tuning_trials,
     )
 
     X_tr = train_df[feature_cols].values
@@ -805,6 +872,7 @@ def run_submission_evaluation(
                 "n_test": int(len(y_te_default)),
                 "n_default_test": int(np.sum(y_te_default)),
                 "tuned_val_auc": tuned_val_auc,
+                "tuning_trials": int(tuning_trials),
                 "status": "ok",
             }
         ]
@@ -822,8 +890,13 @@ def run_benchmarks(
     drop_cols: Sequence[str] = ("CompNo", "yyyy", "mm"),
     min_train_years: int = 8,
     random_state: int = 42,
+    max_tuning_trials: int = 12,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     _set_global_seed(random_state)
+    print(
+        f"[rolling] horizons={list(horizons)} models={list(model_names)} min_train_years={min_train_years} tuning_trials={max_tuning_trials}",
+        flush=True,
+    )
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -841,14 +914,16 @@ def run_benchmarks(
         sub = df[feature_cols + [label_col, time_col]].copy()
 
         for m in model_names:
+            print(f"[run] horizon={h} model={m}", flush=True)
             try:
-                tuned_params, tuned_val_auc = _tune_time_series_params(
+                tuned_params, tuned_val_auc, tuning_trials = _tune_time_series_params(
                     sub,
                     label_col=label_col,
                     feature_cols=feature_cols,
                     model_name=m,
                     year_col=time_col,
                     random_state=random_state,
+                    max_tuning_trials=max_tuning_trials,
                 )
 
                 res, yearly = rolling_window_eval(
@@ -872,6 +947,7 @@ def run_benchmarks(
                         "n_test": res.n_test,
                         "n_default_test": res.n_default_test,
                         "tuned_val_auc": tuned_val_auc,
+                        "tuning_trials": int(tuning_trials),
                         "status": "ok",
                     }
                 )
@@ -881,6 +957,7 @@ def run_benchmarks(
                         "horizon_months": int(h),
                         "model": m,
                         "tuned_val_auc": tuned_val_auc,
+                        "tuning_trials": int(tuning_trials),
                         "best_params": json.dumps(tuned_params, sort_keys=True),
                         "status": "ok",
                     }
@@ -888,6 +965,10 @@ def run_benchmarks(
 
                 yearly["horizon_months"] = int(h)
                 yearly_all.append(yearly)
+                print(
+                    f"[done] horizon={h} model={m} overall_auc={res.overall_auc:.6f} mean_yearly_auc={res.mean_yearly_auc:.6f}",
+                    flush=True,
+                )
             except Exception as ex:
                 summary_rows.append(
                     {
@@ -899,6 +980,7 @@ def run_benchmarks(
                         "n_test": 0,
                         "n_default_test": 0,
                         "tuned_val_auc": np.nan,
+                        "tuning_trials": 0,
                         "status": f"failed: {ex}",
                     }
                 )
@@ -907,10 +989,12 @@ def run_benchmarks(
                         "horizon_months": int(h),
                         "model": m,
                         "tuned_val_auc": np.nan,
+                        "tuning_trials": 0,
                         "best_params": "{}",
                         "status": f"failed: {ex}",
                     }
                 )
+                print(f"[failed] horizon={h} model={m} error={ex}", flush=True)
 
     summary_df = pd.DataFrame(summary_rows).sort_values(["horizon_months", "mean_yearly_auc"], ascending=[True, False])
     yearly_df = pd.concat(yearly_all, ignore_index=True) if yearly_all else pd.DataFrame()
