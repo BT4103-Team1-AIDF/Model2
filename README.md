@@ -70,44 +70,89 @@ brew install libomp
 Quick check:
 
 ```bash
-python run_benchmarks.py --help
+python3 scripts/benchmark.py --help
+# optional (legacy rolling/submission CLI):
+python3 run_benchmarks.py --help
 ```
 
 ## Run Benchmarks
 
-### Run all models for 12-month horizon only (works with current dataset)
+### A) Recommended: modular benchmark CLI (`scripts/benchmark.py`)
+
+Use this for the current restructured pipeline (`benchmarking/` + `scripts/benchmark.py`).
+
+### Quick run: 12-month horizon, 5 models, fast tuning
 
 ```bash
-python run_benchmarks.py \
-  --data-path ../../Data/train_labeled_upto2014.csv \
-  --output-dir outputs/h12 \
+python3 scripts/benchmark.py \
+  --train-path /path/to/train_multilabel_upto2014_1to60m.csv \
+  --test-path /path/to/test_multilabel_from2015_1to60m.csv \
   --horizons 12 \
-  --models logistic random_forest xgboost lightgbm \
-  --max-tuning-trials 12
+  --models logistic_regression,random_forest,xgboost,lightgbm,lstm \
+  --tune \
+  --max-tuning-trials 1 \
+  --output-dir outputs/h12_quick
 ```
 
-### Run full target horizons (requires corresponding label columns)
+### Full run: all horizons, 5 models, stronger tuning
 
 ```bash
-python run_benchmarks.py \
+python3 scripts/benchmark.py \
+  --train-path /path/to/train_multilabel_upto2014_1to60m.csv \
+  --test-path /path/to/test_multilabel_from2015_1to60m.csv \
+  --horizons 1,3,6,12,24,36,48,60 \
+  --models logistic_regression,random_forest,xgboost,lightgbm,lstm \
+  --tune \
+  --max-tuning-trials 12 \
+  --output-dir outputs/full8h_5models
+```
+
+### Split run (faster): first half + second half horizons
+
+```bash
+# First half
+python3 scripts/benchmark.py \
+  --train-path /path/to/train_multilabel_upto2014_1to60m.csv \
+  --test-path /path/to/test_multilabel_from2015_1to60m.csv \
+  --horizons 1,3,6,12 \
+  --models logistic_regression,random_forest,xgboost,lightgbm,lstm \
+  --tune --max-tuning-trials 1 \
+  --output-dir outputs/half4h_head
+
+# Second half
+python3 scripts/benchmark.py \
+  --train-path /path/to/train_multilabel_upto2014_1to60m.csv \
+  --test-path /path/to/test_multilabel_from2015_1to60m.csv \
+  --horizons 24,36,48,60 \
+  --models logistic_regression,random_forest,xgboost,lightgbm,lstm \
+  --tune --max-tuning-trials 1 \
+  --output-dir outputs/half4h_tail
+```
+
+### B) Legacy CLI (`run_benchmarks.py`) for rolling/submission mode
+
+This legacy command supports rolling-window and submission-style runs.
+
+### Legacy rolling example
+
+```bash
+python3 run_benchmarks.py \
+  --mode rolling \
   --data-path /path/to/train_with_all_horizon_labels.csv \
-  --output-dir outputs/full_horizon \
+  --output-dir outputs/rolling_full \
   --horizons 1 3 6 12 24 36 48 60 \
   --models logistic random_forest xgboost lightgbm lstm \
   --max-tuning-trials 12
 ```
 
-### Run submission-style evaluation (train<=2014, test>=2015)
-
-This mode produces CodaBench-like artifacts:
-`predictions.csv`, `yearly_metrics.csv`, `yearly_auc.png`, `scores.txt`, `detailed_results.html`.
+### Legacy submission example
 
 ```bash
-python run_benchmarks.py \
+python3 run_benchmarks.py \
   --mode submission \
   --data-path /path/to/train_labeled_upto2014.csv \
   --test-data-path /path/to/test_labeled_from2015.csv \
-  --output-dir outputs/submission_h12_lightgbm \
+  --output-dir outputs/submission_h12_lightgbm_legacy \
   --horizons 12 \
   --models lightgbm \
   --train-end-year 2014 \
